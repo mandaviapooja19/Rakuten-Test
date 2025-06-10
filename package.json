@@ -1,0 +1,15 @@
+{
+  "name": "fillr-test-d",
+  "scripts": {
+    "test": "./test"
+  },
+  "jest": {
+    "testEnvironment": "jsdom"
+  },
+  "dependencies": {
+    "jest-environment-jsdom": "^29.7.0",
+    "jsdom": "^26.1.0",
+    "fs": "^0.0.1-security",
+    "path": "^0.12.7"
+  }
+}
