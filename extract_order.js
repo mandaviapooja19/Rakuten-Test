@@ -5,114 +5,124 @@
 // The order_details data you are sending should match the `expected_output` object in `test.js`
 
 const fs = require('fs');
-const path = require('path');
-const {JSDOM} = require('jsdom');
-
-const HTML_FILE_NAME = './walmart_order.html';
-const filePath = path.join(__dirname, HTML_FILE_NAME);
+const html = fs.readFileSync('./walmart_order.html', 'utf-8');
 
 async function extractOrderData() {
-    try{
-        let htmlContent = await readHTMLFile(filePath);
-        
-        const extractedData = {};
+  try{
 
-        const dom = new JSDOM(htmlContent);
-        const document = dom.window.document;
-
-        // --------------Extract Order Imfo -------------
-        const orderInfoDivs = Array.from(document.querySelectorAll('div.tc.mt1.f6'));
-        const orderDiv = orderInfoDivs.find(div => div.textContent.includes('Order #'));
-
-        if (orderDiv) {
-            const match = orderDiv.textContent.match(/Order\s+#(\d+)/);
-            if (match) {
-                extractedData['Order Number'] = match[1]; // Just the number without #
-            }
-        }
-
-        // --------------Extract Subtotal, Grand total and Tax-----------------
-        const totalSavedElement = document.querySelector('h1.b.ma0.mb3.f2');
-        const totalSavedMatch = totalSavedElement?.textContent?.match(/\$([\d\.]+) today!/);
-        const totalSaved = totalSavedMatch ? totalSavedMatch[1] : 'N/A';
-        
-        const iframe = document.querySelector('iframe[src*="cart_total"]');
-        if (!iframe) {
-            throw new Error('Iframe with cart_total not found.');
-        }
-
-        const src = iframe.getAttribute('src');
-        const queryString = src.split('?')[1];
-        const params = new URLSearchParams(queryString);
-
-        extractedData['Subtotal'] = params.get('subtotal');
-        extractedData['Grand Total'] = params.get('cart_total');
-        extractedData['Tax'] = (parseFloat(extractedData['Grand Total']) - parseFloat(extractedData['Subtotal'])).toFixed(2);
-
-        // --------------Extract Shipping-----------------
-        // extractedData['Shipping'] = '0.00'; // todo: stated as free shipping
-        const shippingHeader = document.querySelector('[data-testid="shipping-card-header"] h2');
-        if (shippingHeader) {
-            const text = shippingHeader.textContent.trim().toLowerCase();
-            if (text.includes('free')) {
-                extractedData['Shipping'] = '0';
-            } else {
-                const match = text.match(/\$[\d.]+/);
-                extractedData['Shipping'] = match ? match[0].replace('$', '') : 'Unknown';
-            }
-        }
-
-
-        // --------------Extract Payment Type-----------------
-        const h3List = Array.from(document.querySelectorAll('h3'));
-        const paymentHeader = h3List.find(h3 => h3.textContent.trim().toLowerCase() === 'payment method');
-
-        if (paymentHeader) {
-          const paymentSection = paymentHeader.closest('section');
-          const img = paymentSection?.querySelector('img[alt]');
-          extractedData['Payment Type'] = img?.getAttribute('alt') || 'Unknown';
-        }
-
-        // --------------Extract Product Details-----------------
-        // Extract product names from <img alt="">
-        const collapsedItemList = document.querySelector('[data-testid="collapsedItemList"]');
-        const productImgs = collapsedItemList ? collapsedItemList.querySelectorAll('img[alt]') : [];
-        const productNames = Array.from(productImgs)
-            .map(img => img.getAttribute('alt'))
-            .filter(alt => alt && alt.length > 10 && !alt.toLowerCase().includes('decorative image'));
-
-        const priceArray = params.get('item_prices')
-            .split(',')
-            .map(val => parseFloat(val));
-        const quantityArray = params.get('item_quantities')
-            .split(',')
-            .map(val => parseInt(val));
-
-        extractedData['Products'] = productNames.map((name, index) => {
-            const price = priceArray[index] || 0;
-            const quantity = quantityArray[index] || 1;
-            return {
-            "Product Name": name,
-            "Unit Price": price.toFixed(2),
-            "Quantity": quantity,
-            "Line Total": (price * quantity).toFixed(2)
-            };
-        });
-
-        // console.log(extractedData)
-        return extractedData;
-    } catch(error){
-        console.log(`Error Occurred ${error.message}`);
+    // Extract iframe src
+    const iframeMatch = html.match(/<iframe[^>]+src="([^"]+)"[^>]*><\/iframe>/);
+    if (!iframeMatch) {
+      console.error("iframe not found");
+      process.exit(1);
     }
+    let iframeSrc = iframeMatch[1];
+    // Safely decode HTML entities like &amp;
+    if (iframeSrc.includes('&amp;')) {
+      iframeSrc = iframeSrc.replace(/&amp;/g, '&');
+    }
+
+    // Parse iframe URL query params
+    const query = iframeSrc.split('?')[1];
+    const params = new URLSearchParams(query);
+
+    const orderNumber = extractOrderNumber();
+
+    const productList = extractProductList(params);
+
+    const {shippingValue, total, subtotal, tax} = extractSubtotalAndGrandTotal(params);
+
+    const paymentType = extractPaymentType();
+    
+    const extractedData = {
+      "Order Number": orderNumber,
+      "Products": productList, 
+      "Shipping": shippingValue, 
+      "Subtotal": subtotal,
+      "Grand Total": total,
+      "Payment Type": paymentType,
+      "Tax": tax
+    }
+    // console.log(extractedData)
+    return extractedData; 
+
+  }catch (error){
+    console.log(`Error Occurred ${error.message}`);
+  }
 }
 
-async function readHTMLFile(filePath) {
-    try {
-        return await fs.promises.readFile(filePath, 'utf8');
-    } catch (error) {
-        console.error(`An error occurred while reading the file: ${error.message}`);
-        throw error;
-    }
+function extractOrderNumber(){
+  const orderNumberMatch = html.match(/Order\s+#(\d{15,})/);
+  return orderNumberMatch ? orderNumberMatch[1] : null;
+}
+
+function extractProductList(params){
+
+  const prices = params.get('item_prices')?.split(',').map(p => parseFloat(p)) || [];
+  const quantities = params.get('item_quantities')?.split(',').map(q => parseInt(q)) || [];
+
+  //Extract product names from <img alt="..."> under [data-testid="collapsedItemList"]
+  const productBlock = html.split('data-testid="collapsedItemList"')[1] || '';
+  const nameRegex = /<img[^>]+alt="([^"]+)"[^>]*>/g;
+
+  const productNames = [];
+  let match;
+  while ((match = nameRegex.exec(productBlock)) !== null) {
+    productNames.push(match[1]);
+  }
+
+  //Build product objects
+  const count = Math.min(productNames.length, prices.length, quantities.length);
+  const productList = [];
+
+  for (let i = 0; i < count; i++) {
+    const name = productNames[i];
+    const unitPrice = prices[i];
+    const quantity = quantities[i];
+    const lineTotal = parseFloat((unitPrice * quantity).toFixed(2));
+
+    productList.push({
+      "Product Name": name,
+      "Unit Price": unitPrice.toFixed(2),
+      Quantity: quantity.toString(),
+      "Line Total": lineTotal.toFixed(2)
+    });
+  }
+  return productList;
+}
+
+function extractSubtotalAndGrandTotal(params ){
+  const subtotal = parseFloat(params.get('subtotal'));
+  const total = parseFloat(params.get('cart_total'));
+  let shipping = parseFloat(params.get('shipping') || '0'); // fallback to 0 if not present
+
+  //Calculate tax
+  const tax = parseFloat((total - subtotal - shipping).toFixed(2));
+
+  //Check for "Free shipping" text in visible HTML
+  const hasFreeShipping = html.includes('Free shipping');
+  if(hasFreeShipping){
+    shipping = '0';
+  }
+
+  const result = {
+    subtotal: subtotal,
+    total: total,
+    tax: tax,
+    shippingValue: shipping
+  };
+  return result;
+}
+
+function extractPaymentType(){
+  // Extract the payment type from the image src (e.g., wallet-visa-dark-logo.png)
+  const paymentTypeMatch = html.match(/wallet-(\w+)-dark-logo\.png/i);
+  return paymentTypeMatch ? capitalize(paymentTypeMatch[1]) : null;
+}
+
+// Capitalize first letter helper (e.g., visa -> Visa)
+function capitalize(str) {
+  return str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
 }
 
 // extractOrderData();
